@@ -29,22 +29,35 @@ WATCHED_WALLETS_EVM = {
 last_tx_cache = {}
 
 def send_telegram_alert(network, name, address, tx):
-    """Mengirim pesan langsung via Telegram Bot HTTP API"""
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    
     message = (
         f"🚨 *SMART WALLET ENTRY ({network})* 🚨\n\n"
         f"👤 *Trader:* {name}\n"
         f"👛 *Wallet:* `{address[:6]}...{address[-4:]}`\n"
-        f"🟢 *Action:* {tx['type']} ({tx['amount_usd']})\n"
+        f"🟢 *Action:* {tx['type']} \n"
+        f"💰 *Estimasi Nilai:* `{tx['amount_usd']}`\n"
         f"🪙 *Token:* {tx['token_name']}\n"
-        f"📋 *Contract Address / Dest:*\n`{tx['ca']}`\n\n"
-        f"🔗 [DexScreener](https://dexscreener.com/search?q={tx['ca']})"
+        f"📋 *Contract Address (CA):*\n`{tx['ca']}`"
     )
+    
+    # Tombol Interaktif
+    reply_markup = {
+        "inline_keyboard": [
+            [
+                {"text": "📊 DexScreener", "url": f"https://dexscreener.com/search?q={tx['ca']}"},
+                {"text": "🔍 Solscan/Etherscan", "url": f"https://solscan.io/tx/{tx['hash']}" if network == "SOLANA" else f"https://etherscan.io/tx/{tx['hash']}"}
+            ]
+        ]
+    }
+
     payload = {
         "chat_id": TELEGRAM_GROUP_CHAT_ID,
         "text": message,
-        "parse_mode": "Markdown"
+        "parse_mode": "Markdown",
+        "reply_markup": reply_markup
     }
+    
     try:
         requests.post(url, json=payload, timeout=10)
     except Exception as e:
@@ -57,12 +70,13 @@ def check_solana_activity(wallet_address):
         if response.status_code == 200:
             data = response.json()
             if data and len(data) > 0:
-                tx_hash = data[0].get("txHash")
+                tx_info = data[0]
+                tx_hash = tx_info.get("txHash")
                 return {
                     "hash": tx_hash,
-                    "type": "SWAP / BUY",
-                    "amount_usd": "Check on DexScreener",
-                    "token_name": "Solana Token",
+                    "type": "SWAP / BUY TOKEN",
+                    "amount_usd": "Active Move",
+                    "token_name": "Solana Asset",
                     "ca": wallet_address
                 }
         return None
@@ -79,9 +93,9 @@ def check_evm_activity(wallet_address):
                 tx_info = data["result"][0]
                 return {
                     "hash": tx_info.get("hash"),
-                    "type": "EVM TX",
+                    "type": "EVM SWAP/TX",
                     "amount_usd": "Whale Activity",
-                    "token_name": "ERC-20 Token",
+                    "token_name": "ERC-20 Asset",
                     "ca": tx_info.get("to") or wallet_address
                 }
         return None
@@ -89,7 +103,7 @@ def check_evm_activity(wallet_address):
         return None
 
 def main():
-    print("Bot Alert Multi-Chain Honalabs Berjalan...")
+    print("Bot Alert Multi-Chain Honalabs Berjalan dengan Tombol Interaktif...")
     while True:
         for address, name in WATCHED_WALLETS_SOL.items():
             tx = check_solana_activity(address)
