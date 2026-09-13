@@ -6,7 +6,7 @@ TELEGRAM_BOT_TOKEN = "8925455594:AAHzlQM2bOjAwCiDvu2DhpT7vj8tacgiKE4"
 TELEGRAM_GROUP_CHAT_ID = "-1002362131585"
 
 # --- API KEY ---
-ETHERSCAN_API_KEY = "4TG86FPSB6Y3FS4ZJ7BZHGSXW3KQHT9RJZ"
+ETHERSCAN_API_KEY = "4TG86FPSB6Y3FS4ZJ7BZHGSW3KQ"
 
 # --- DATABASE SMART WALLET & KOL ---
 WATCHED_WALLETS_SOL = {
@@ -37,9 +37,9 @@ def send_telegram_alert(network, name, address, tx):
         f"👤 *Target:* {name}\n"
         f"👛 *Wallet:* `{address[:6]}...{address[-4:]}`\n"
         f"🟢 *Action:* {tx['type']} \n"
-        f"💰 *Status:* `{tx['amount_usd']}`\n"
-        f"🪙 *Asset:* {tx['token_name']}\n"
-        f"📋 *Detail / CA:*\n`{tx['ca']}`"
+        f"💰 *Info:* `{tx['amount_usd']}`\n"
+        f"🪙 *Asset / Program:* {tx['token_name']}\n"
+        f"📋 *Token / Target CA:*\n`{tx['ca']}`"
     )
     
     reply_markup = {
@@ -65,7 +65,6 @@ def send_telegram_alert(network, name, address, tx):
 
 def check_solana_activity(wallet_address):
     try:
-        # Menggunakan public RPC Solana JSON-RPC untuk deteksi signature terbaru yang lebih akurat
         rpc_url = "https://api.mainnet-beta.solana.com"
         payload = {
             "jsonrpc": "2.0",
@@ -79,12 +78,30 @@ def check_solana_activity(wallet_address):
             if "result" in data and len(data["result"]) > 0:
                 sig_info = data["result"][0]
                 tx_hash = sig_info.get("signature")
+                
+                # Ambil detail transaksi untuk melihat interaksi program/token
+                tx_payload = {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "getTransaction",
+                    "params": [tx_hash, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0}]
+                }
+                tx_resp = requests.post(rpc_url, json=tx_payload, timeout=10)
+                token_ca = wallet_address
+                if tx_resp.status_code == 200:
+                    tx_data = tx_resp.json().get("result")
+                    if tx_data and "transaction" in tx_data:
+                        account_keys = tx_data["transaction"]["message"]["accountKeys"]
+                        # Cari akun terakhir atau akun yang berinteraksi sebagai contract/token mint
+                        if len(account_keys) > 2:
+                            token_ca = account_keys[-1].get("pubkey", wallet_address)
+
                 return {
                     "hash": tx_hash,
-                    "type": "SOLANA SWAP / TX",
-                    "amount_usd": "Live Activity Detected",
-                    "token_name": "Solana Token",
-                    "ca": wallet_address
+                    "type": "SOLANA SWAP DETECTED",
+                    "amount_usd": "On-Chain Swap",
+                    "token_name": "Target Token / Pool",
+                    "ca": token_ca
                 }
         return None
     except Exception as e:
@@ -92,25 +109,27 @@ def check_solana_activity(wallet_address):
 
 def check_evm_activity(wallet_address):
     try:
-        url = f"https://api.etherscan.io/api?module=account&action=txlist&address={wallet_address}&startblock=0&endblock=99999999&page=1&offset=1&sort=desc&apikey={ETHERSCAN_API_KEY}"
+        url = f"https://api.etherscan.io/api?module=account&action=tokentx&address={wallet_address}&page=1&offset=1&sort=desc&apikey={ETHERSCAN_API_KEY}"
         response = requests.get(url, timeout=10)
         if response.status_code == 200:
             data = response.json()
             if data.get("status") == "1" and len(data.get("result", [])) > 0:
                 tx_info = data["result"][0]
+                token_symbol = tx_info.get("tokenSymbol", "ERC-20")
+                token_contract = tx_info.get("contractAddress", wallet_address)
                 return {
                     "hash": tx_info.get("hash"),
-                    "type": "EVM TX / SWAP",
-                    "amount_usd": "Whale Transfer",
-                    "token_name": "ERC-20 Asset",
-                    "ca": tx_info.get("to") or wallet_address
+                    "type": f"EVM TOKEN TRANSFER ({token_symbol})",
+                    "amount_usd": f"Value: {tx_info.get('value', '0')[:6]}...",
+                    "token_name": token_symbol,
+                    "ca": token_contract
                 }
         return None
     except Exception as e:
         return None
 
 def main():
-    print("Bot Alert V2 Berjalan dengan Solana RPC & Etherscan...")
+    print("Bot Alert V3 Berjalan (Advanced Token Parsing)...")
     while True:
         for address, name in WATCHED_WALLETS_SOL.items():
             tx = check_solana_activity(address)
