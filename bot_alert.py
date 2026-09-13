@@ -33,19 +33,17 @@ def send_telegram_alert(network, name, address, tx):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     
     message = (
-        f"🚨 *SMART WALLET ALERT ({network})* 🚨\n\n"
+        f"🚨 *SMART WALLET SWAP ALERT ({network})* 🚨\n\n"
         f"👤 *Target:* {name}\n"
         f"👛 *Wallet:* `{address[:6]}...{address[-4:]}`\n"
         f"🟢 *Action:* {tx['type']} \n"
-        f"💰 *Info:* `{tx['amount_usd']}`\n"
-        f"🪙 *Asset / Program:* {tx['token_name']}\n"
-        f"📋 *Token / Target CA:*\n`{tx['ca']}`"
+        f"🪙 *Token Mint / CA:*\n`{tx['ca']}`"
     )
     
     reply_markup = {
         "inline_keyboard": [
             [
-                {"text": "📊 DexScreener", "url": f"https://dexscreener.com/search?q={tx['ca']}"},
+                {"text": "📊 DexScreener", "url": f"https://dexscreener.com/solana/{tx['ca']}" if network == "SOLANA" else f"https://dexscreener.com/search?q={tx['ca']}"},
                 {"text": "🔍 Explorer", "url": f"https://solscan.io/tx/{tx['hash']}" if network == "SOLANA" else f"https://etherscan.io/tx/{tx['hash']}"}
             ]
         ]
@@ -79,7 +77,7 @@ def check_solana_activity(wallet_address):
                 sig_info = data["result"][0]
                 tx_hash = sig_info.get("signature")
                 
-                # Ambil detail transaksi untuk melihat interaksi program/token
+                # Ambil detail transaksi secara mendalam untuk membaca token balances
                 tx_payload = {
                     "jsonrpc": "2.0",
                     "id": 1,
@@ -87,21 +85,35 @@ def check_solana_activity(wallet_address):
                     "params": [tx_hash, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0}]
                 }
                 tx_resp = requests.post(rpc_url, json=tx_payload, timeout=10)
-                token_ca = wallet_address
+                token_mint = wallet_address
+                
                 if tx_resp.status_code == 200:
-                    tx_data = tx_resp.json().get("result")
-                    if tx_data and "transaction" in tx_data:
-                        account_keys = tx_data["transaction"]["message"]["accountKeys"]
-                        # Cari akun terakhir atau akun yang berinteraksi sebagai contract/token mint
-                        if len(account_keys) > 2:
-                            token_ca = account_keys[-1].get("pubkey", wallet_address)
+                    result_data = tx_resp.json().get("result")
+                    if result_data and "meta" in result_data:
+                        meta = result_data["meta"]
+                        post_balances = meta.get("postTokenBalances", [])
+                        
+                        # Cari token mint yang masuk ke wallet target
+                        for pb in post_balances:
+                            if pb.get("owner") == wallet_address:
+                                mint = pb.get("mint")
+                                # Hindari token native WSOL jika ada token lain yang dibeli
+                                if mint and mint != "So11111111121111111111111111111111111111112":
+                                    token_mint = mint
+                                    break
+                        # Jika tidak ketemu dari owner, ambil mint pertama yang valid di transaksi
+                        if token_mint == wallet_address and post_balances:
+                            for pb in post_balances:
+                                mint = pb.get("mint")
+                                if mint and mint != "So11111111121111111111111111111111111111112":
+                                    token_mint = mint
+                                    break
 
                 return {
                     "hash": tx_hash,
-                    "type": "SOLANA SWAP DETECTED",
-                    "amount_usd": "On-Chain Swap",
-                    "token_name": "Target Token / Pool",
-                    "ca": token_ca
+                    "type": "SOLANA BUY / SWAP",
+                    "token_name": "New Token",
+                    "ca": token_mint
                 }
         return None
     except Exception as e:
@@ -119,8 +131,7 @@ def check_evm_activity(wallet_address):
                 token_contract = tx_info.get("contractAddress", wallet_address)
                 return {
                     "hash": tx_info.get("hash"),
-                    "type": f"EVM TOKEN TRANSFER ({token_symbol})",
-                    "amount_usd": f"Value: {tx_info.get('value', '0')[:6]}...",
+                    "type": f"EVM BUY / SWAP ({token_symbol})",
                     "token_name": token_symbol,
                     "ca": token_contract
                 }
@@ -129,7 +140,7 @@ def check_evm_activity(wallet_address):
         return None
 
 def main():
-    print("Bot Alert V3 Berjalan (Advanced Token Parsing)...")
+    print("Bot Alert V4 Berjalan (Token Balance Parsing)...")
     while True:
         for address, name in WATCHED_WALLETS_SOL.items():
             tx = check_solana_activity(address)
