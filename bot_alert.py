@@ -5,7 +5,7 @@ import requests
 TELEGRAM_BOT_TOKEN = "8925455594:AAHzlQM2bOjAwCiDvu2DhpT7vj8tacgiKE4"
 TELEGRAM_GROUP_CHAT_ID = "-1002362131585"
 
-# --- API KEY (Masukkan API Key Etherscan Anda di sini) ---
+# --- API KEY ---
 ETHERSCAN_API_KEY = "MASUKKAN_API_KEY_ETHERSCAN_DISINI"
 
 # --- DATABASE SMART WALLET & KOL ---
@@ -16,8 +16,6 @@ WATCHED_WALLETS_SOL = {
     "CEUA7zVoDRqRYoeHTP58UHU6TR8yvtVbeLrX1dppqoXJ": "Sol Smart 4",
     "9vau6AGRB7ZWaNXrL6RfsbztB1qdLu9RkPzFcgD37UMb": "Sol Smart 5",
     "6ANGS6SSCxkv6hV3iymHHMESqDz7EFaecCwHA8qTswpr": "Sol Smart 6",
-    "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA": "Solana Program / KOL Alpha 1",
-    "5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1": "Raydium Liquidity KOL Pool",
 }
 
 WATCHED_WALLETS_EVM = {
@@ -27,10 +25,6 @@ WATCHED_WALLETS_EVM = {
     "0x9d7451dd30a9d264865acf3ca8c4741d97761d9f": "Robinhood Whale 4",
     "0x07fb753a79177927fa871eaa6eb1ef60a00d3473": "Robinhood Whale 5",
     "0x15b8ceec9120d30c7284d9d5eee9efb3659211ef": "Robinhood Whale 6",
-    "0x4b10707123c79f6e99be486dcd95d60323988d76": "Robinhood Whale 7",
-    "0x150952108f28dcaf4e4542090e67cd2696563944": "Robinhood Whale 8",
-    "0xBE0eB53F46cd790Cd13851d5EFf43D12404d33E8": "Binance Hot Wallet KOL/Whale",
-    "0x28C6c06298d514Db089934071355E5743bf21d60": "Binance 14",
 }
 
 last_tx_cache = {}
@@ -39,20 +33,20 @@ def send_telegram_alert(network, name, address, tx):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     
     message = (
-        f"🚨 *KOL / SMART WALLET ALERT ({network})* 🚨\n\n"
+        f"🚨 *SMART WALLET ALERT ({network})* 🚨\n\n"
         f"👤 *Target:* {name}\n"
         f"👛 *Wallet:* `{address[:6]}...{address[-4:]}`\n"
         f"🟢 *Action:* {tx['type']} \n"
-        f"💰 *Estimasi Nilai:* `{tx['amount_usd']}`\n"
-        f"🪙 *Token:* {tx['token_name']}\n"
-        f"📋 *Contract Address (CA):*\n`{tx['ca']}`"
+        f"💰 *Status:* `{tx['amount_usd']}`\n"
+        f"🪙 *Asset:* {tx['token_name']}\n"
+        f"📋 *Detail / CA:*\n`{tx['ca']}`"
     )
     
     reply_markup = {
         "inline_keyboard": [
             [
                 {"text": "📊 DexScreener", "url": f"https://dexscreener.com/search?q={tx['ca']}"},
-                {"text": "🔍 Solscan/Etherscan", "url": f"https://solscan.io/tx/{tx['hash']}" if network == "SOLANA" else f"https://etherscan.io/tx/{tx['hash']}"}
+                {"text": "🔍 Explorer", "url": f"https://solscan.io/tx/{tx['hash']}" if network == "SOLANA" else f"https://etherscan.io/tx/{tx['hash']}"}
             ]
         ]
     }
@@ -71,18 +65,25 @@ def send_telegram_alert(network, name, address, tx):
 
 def check_solana_activity(wallet_address):
     try:
-        url = f"https://public-api.solscan.io/account/transactions?account={wallet_address}&limit=1"
-        response = requests.get(url, timeout=10)
+        # Menggunakan public RPC Solana JSON-RPC untuk deteksi signature terbaru yang lebih akurat
+        rpc_url = "https://api.mainnet-beta.solana.com"
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "getSignaturesForAddress",
+            "params": [wallet_address, {"limit": 1}]
+        }
+        response = requests.post(rpc_url, json=payload, timeout=10)
         if response.status_code == 200:
             data = response.json()
-            if data and len(data) > 0:
-                tx_info = data[0]
-                tx_hash = tx_info.get("txHash")
+            if "result" in data and len(data["result"]) > 0:
+                sig_info = data["result"][0]
+                tx_hash = sig_info.get("signature")
                 return {
                     "hash": tx_hash,
-                    "type": "KOL SWAP / BUY",
-                    "amount_usd": "Active Move",
-                    "token_name": "Solana Asset",
+                    "type": "SOLANA SWAP / TX",
+                    "amount_usd": "Live Activity Detected",
+                    "token_name": "Solana Token",
                     "ca": wallet_address
                 }
         return None
@@ -99,8 +100,8 @@ def check_evm_activity(wallet_address):
                 tx_info = data["result"][0]
                 return {
                     "hash": tx_info.get("hash"),
-                    "type": "KOL EVM SWAP/TX",
-                    "amount_usd": "Whale Activity",
+                    "type": "EVM TX / SWAP",
+                    "amount_usd": "Whale Transfer",
                     "token_name": "ERC-20 Asset",
                     "ca": tx_info.get("to") or wallet_address
                 }
@@ -109,23 +110,23 @@ def check_evm_activity(wallet_address):
         return None
 
 def main():
-    print("Bot Alert KOL & Smart Wallet Berjalan dengan API Key...")
+    print("Bot Alert V2 Berjalan dengan Solana RPC & Etherscan...")
     while True:
         for address, name in WATCHED_WALLETS_SOL.items():
             tx = check_solana_activity(address)
             if tx and tx["hash"] != last_tx_cache.get(address):
                 last_tx_cache[address] = tx["hash"]
                 send_telegram_alert("SOLANA", name, address, tx)
-            time.sleep(2)
+            time.sleep(3)
 
         for address, name in WATCHED_WALLETS_EVM.items():
             tx = check_evm_activity(address)
             if tx and tx["hash"] != last_tx_cache.get(address):
                 last_tx_cache[address] = tx["hash"]
                 send_telegram_alert("EVM", name, address, tx)
-            time.sleep(2)
+            time.sleep(3)
 
-        time.sleep(30)
+        time.sleep(20)
 
 if __name__ == "__main__":
     main()
