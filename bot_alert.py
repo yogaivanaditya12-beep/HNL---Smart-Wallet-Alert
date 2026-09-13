@@ -33,11 +33,11 @@ def send_telegram_alert(network, name, address, tx):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     
     message = (
-        f"🚨 *SMART WALLET SWAP ALERT ({network})* 🚨\n\n"
+        f"🚨 *SMART WALLET ALERT ({network})* 🚨\n\n"
         f"👤 *Target:* {name}\n"
         f"👛 *Wallet:* `{address[:6]}...{address[-4:]}`\n"
         f"🟢 *Action:* {tx['type']} \n"
-        f"🪙 *Token Mint / CA:*\n`{tx['ca']}`"
+        f"📋 *Target / Contract:*\n`{tx['ca']}`"
     )
     
     reply_markup = {
@@ -77,7 +77,6 @@ def check_solana_activity(wallet_address):
                 sig_info = data["result"][0]
                 tx_hash = sig_info.get("signature")
                 
-                # Ambil detail transaksi secara mendalam untuk membaca token balances
                 tx_payload = {
                     "jsonrpc": "2.0",
                     "id": 1,
@@ -92,16 +91,12 @@ def check_solana_activity(wallet_address):
                     if result_data and "meta" in result_data:
                         meta = result_data["meta"]
                         post_balances = meta.get("postTokenBalances", [])
-                        
-                        # Cari token mint yang masuk ke wallet target
                         for pb in post_balances:
                             if pb.get("owner") == wallet_address:
                                 mint = pb.get("mint")
-                                # Hindari token native WSOL jika ada token lain yang dibeli
                                 if mint and mint != "So11111111121111111111111111111111111111112":
                                     token_mint = mint
                                     break
-                        # Jika tidak ketemu dari owner, ambil mint pertama yang valid di transaksi
                         if token_mint == wallet_address and post_balances:
                             for pb in post_balances:
                                 mint = pb.get("mint")
@@ -111,8 +106,7 @@ def check_solana_activity(wallet_address):
 
                 return {
                     "hash": tx_hash,
-                    "type": "SOLANA BUY / SWAP",
-                    "token_name": "New Token",
+                    "type": "SOLANA SWAP / TX",
                     "ca": token_mint
                 }
         return None
@@ -121,26 +115,26 @@ def check_solana_activity(wallet_address):
 
 def check_evm_activity(wallet_address):
     try:
-        url = f"https://api.etherscan.io/api?module=account&action=tokentx&address={wallet_address}&page=1&offset=1&sort=desc&apikey={ETHERSCAN_API_KEY}"
+        # Menggunakan txlist untuk menangkap semua aktivitas transaksi umum (termasuk interaksi smart contract & swap)
+        url = f"https://api.etherscan.io/api?module=account&action=txlist&address={wallet_address}&startblock=0&endblock=99999999&page=1&offset=1&sort=desc&apikey={ETHERSCAN_API_KEY}"
         response = requests.get(url, timeout=10)
         if response.status_code == 200:
             data = response.json()
             if data.get("status") == "1" and len(data.get("result", [])) > 0:
                 tx_info = data["result"][0]
-                token_symbol = tx_info.get("tokenSymbol", "ERC-20")
-                token_contract = tx_info.get("contractAddress", wallet_address)
+                tx_hash = tx_info.get("hash")
+                to_address = tx_info.get("to") or wallet_address
                 return {
-                    "hash": tx_info.get("hash"),
-                    "type": f"EVM BUY / SWAP ({token_symbol})",
-                    "token_name": token_symbol,
-                    "ca": token_contract
+                    "hash": tx_hash,
+                    "type": "EVM TX / CONTRACT INTERACTION",
+                    "ca": to_address
                 }
         return None
     except Exception as e:
         return None
 
 def main():
-    print("Bot Alert V4 Berjalan (Token Balance Parsing)...")
+    print("Bot Alert V5 Berjalan (All Activity Mode)...")
     while True:
         for address, name in WATCHED_WALLETS_SOL.items():
             tx = check_solana_activity(address)
