@@ -5,8 +5,9 @@ import requests
 TELEGRAM_BOT_TOKEN = "8925455594:AAHzlQM2bOjAwCiDvu2DhpT7vj8tacgiKE4"
 TELEGRAM_GROUP_CHAT_ID = "-1002362131585"
 
-# --- API KEY ---
+# --- API KEY & FILTER ---
 ETHERSCAN_API_KEY = "4TG86FPSB6Y3FS4ZJ7BZHGSW3KQ"
+MIN_USD_THRESHOLD = 500.0  # Minimal pembelian dalam USD agar masuk notifikasi
 
 # --- DATABASE SMART WALLET & KOL ---
 WATCHED_WALLETS_SOL = {
@@ -29,6 +30,20 @@ WATCHED_WALLETS_EVM = {
 
 last_tx_cache = {}
 
+def get_crypto_prices():
+    """Mengambil harga terkini SOL dan ETH dalam USD dari CoinGecko Public API"""
+    try:
+        url = "https://api.coingecko.com/api/v3/simple/price?ids=solana,ethereum&vs_currencies=usd"
+        resp = requests.get(url, timeout=5)
+        if resp.status_code == 200:
+            data = resp.json()
+            sol_price = data.get("solana", {}).get("usd", 100.0)
+            eth_price = data.get("ethereum", {}).get("usd", 2500.0)
+            return sol_price, eth_price
+    except Exception:
+        pass
+    return 100.0, 2500.0  # Fallback harga default jika API limit
+
 def send_telegram_alert(network, name, address, tx):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     
@@ -37,7 +52,7 @@ def send_telegram_alert(network, name, address, tx):
         f"👤 *Target:* {name}\n"
         f"👛 *Wallet:* `{address[:6]}...{address[-4:]}`\n"
         f"🟢 *Action:* {tx['type']} \n"
-        f"💰 *Nominal/Spent:* `{tx['amount']} {tx['unit']}`\n"
+        f"💵 *Spent:* `${tx['usd_value']:,.2f} USD`\n"
         f"🪙 *Token CA:*\n`{tx['ca']}`"
     )
     
@@ -62,7 +77,7 @@ def send_telegram_alert(network, name, address, tx):
     except Exception as e:
         print(f"Gagal kirim telegram: {e}")
 
-def check_solana_activity(wallet_address):
+def check_solana_activity(wallet_address, sol_price):
     try:
         rpc_url = "https://api.mainnet-beta.solana.com"
         payload = {
@@ -86,14 +101,13 @@ def check_solana_activity(wallet_address):
                 }
                 tx_resp = requests.post(rpc_url, json=tx_payload, timeout=10)
                 token_mint = wallet_address
-                spent_amount = "0.0"
+                spent_usd = 0.0
                 
                 if tx_resp.status_code == 200:
                     result_data = tx_resp.json().get("result")
                     if result_data and "meta" in result_data:
                         meta = result_data["meta"]
                         
-                        # Hitung selisih SOL yang keluar dari wallet (preBalance - postBalance)
                         account_keys = result_data["transaction"]["message"]["accountKeys"]
                         pre_balances = meta.get("preBalances", [])
                         post_balances = meta.get("postBalances", [])
@@ -103,10 +117,10 @@ def check_solana_activity(wallet_address):
                             if pubkey == wallet_address and idx < len(pre_balances) and idx < len(post_balances):
                                 diff_lamports = pre_balances[idx] - post_balances[idx]
                                 if diff_lamports > 0:
-                                    spent_amount = round(diff_lamports / 1e9, 4)
+                                    spent_sol = diff_lamports / 1e9
+                                    spent_usd = spent_sol * sol_price
                                 break
 
-                        # Cari token mint yang dibeli
                         post_token_balances = meta.get("postTokenBalances", [])
                         for pb in post_token_balances:
                             if pb.get("owner") == wallet_address:
@@ -121,18 +135,19 @@ def check_solana_activity(wallet_address):
                                     token_mint = mint
                                     break
 
-                return {
-                    "hash": tx_hash,
-                    "type": "SOLANA SWAP",
-                    "amount": spent_amount,
-                    "unit": "SOL",
-                    "ca": token_mint
-                }
+                # Filter berdasarkan minimal USD threshold
+                if spent_usd >= MIN_USD_THRESHOLD:
+                    return {
+                        "hash": tx_hash,
+                        "type": "SOLANA SWAP",
+                        "usd_value": spent_usd,
+                        "ca": token_mint
+                    }
         return None
-    except Exception as e:
+    except Exception:
         return None
 
-def check_evm_activity(wallet_address):
+def check_evm_activity(wallet_address, eth_price):
     try:
         url = f"https://api.etherscan.io/api?module=account&action=txlist&address={wallet_address}&startblock=0&endblock=99999999&page=1&offset=1&sort=desc&apikey={ETHERSCAN_API_KEY}"
         response = requests.get(url, timeout=10)
@@ -143,34 +158,38 @@ def check_evm_activity(wallet_address):
                 tx_hash = tx_info.get("hash")
                 to_address = tx_info.get("to") or wallet_address
                 
-                # Konversi nilai wei ke ETH
                 value_wei = int(tx_info.get("value", "0"))
-                value_eth = round(value_wei / 1e18, 4)
+                value_eth = value_wei / 1e18
+                spent_usd = value_eth * eth_price
                 
-                return {
-                    "hash": tx_hash,
-                    "type": "EVM TX / SWAP",
-                    "amount": value_eth,
-                    "unit": "ETH",
-                    "ca": to_address
-                }
+                # Filter berdasarkan minimal USD threshold
+                if spent_usd >= MIN_USD_THRESHOLD:
+                    return {
+                        "hash": tx_hash,
+                        "type": "EVM TX / SWAP",
+                        "usd_value": spent_usd,
+                        "ca": to_address
+                    }
         return None
-    except Exception as e:
+    except Exception:
         return None
 
 def main():
-    print("Bot Alert V6 Berjalan (With Amount Spent Tracking)...")
+    print("Bot Alert V7 Berjalan (Dengan Filter Minimal $500 USD & Format USD)...")
     while True:
+        # Ambil harga konversi terbaru setiap siklus pengecekan
+        sol_price, eth_price = get_crypto_prices()
+
         for address, name in WATCHED_WALLETS_SOL.items():
-            tx = check_solana_activity(address)
+            tx = check_solana_activity(address, sol_price)
             if tx and tx["hash"] != last_tx_cache.get(address):
                 last_tx_cache[address] = tx["hash"]
                 send_telegram_alert("SOLANA", name, address, tx)
             time.sleep(3)
 
         for address, name in WATCHED_WALLETS_EVM.items():
-            tx = check_evm_activity(address)
-            if tx and tx["hash"] != last_tx_cache.get(address):
+            tx = check_evm_activity(address, eth_price)
+            if tx and tx["hash"] != last_tv_cache.get(address) if 'last_tv_cache' in globals() else tx["hash"] != last_tx_cache.get(address):
                 last_tx_cache[address] = tx["hash"]
                 send_telegram_alert("EVM", name, address, tx)
             time.sleep(3)
