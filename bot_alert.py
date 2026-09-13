@@ -33,11 +33,12 @@ def send_telegram_alert(network, name, address, tx):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     
     message = (
-        f"🚨 *SMART WALLET ALERT ({network})* 🚨\n\n"
+        f"🚨 *SMART WALLET BUY ALERT ({network})* 🚨\n\n"
         f"👤 *Target:* {name}\n"
         f"👛 *Wallet:* `{address[:6]}...{address[-4:]}`\n"
         f"🟢 *Action:* {tx['type']} \n"
-        f"📋 *Target / Contract:*\n`{tx['ca']}`"
+        f"💰 *Nominal/Spent:* `{tx['amount']} {tx['unit']}`\n"
+        f"🪙 *Token CA:*\n`{tx['ca']}`"
     )
     
     reply_markup = {
@@ -85,20 +86,36 @@ def check_solana_activity(wallet_address):
                 }
                 tx_resp = requests.post(rpc_url, json=tx_payload, timeout=10)
                 token_mint = wallet_address
+                spent_amount = "0.0"
                 
                 if tx_resp.status_code == 200:
                     result_data = tx_resp.json().get("result")
                     if result_data and "meta" in result_data:
                         meta = result_data["meta"]
-                        post_balances = meta.get("postTokenBalances", [])
-                        for pb in post_balances:
+                        
+                        # Hitung selisih SOL yang keluar dari wallet (preBalance - postBalance)
+                        account_keys = result_data["transaction"]["message"]["accountKeys"]
+                        pre_balances = meta.get("preBalances", [])
+                        post_balances = meta.get("postBalances", [])
+                        
+                        for idx, acc in enumerate(account_keys):
+                            pubkey = acc.get("pubkey") if isinstance(acc, dict) else acc
+                            if pubkey == wallet_address and idx < len(pre_balances) and idx < len(post_balances):
+                                diff_lamports = pre_balances[idx] - post_balances[idx]
+                                if diff_lamports > 0:
+                                    spent_amount = round(diff_lamports / 1e9, 4)
+                                break
+
+                        # Cari token mint yang dibeli
+                        post_token_balances = meta.get("postTokenBalances", [])
+                        for pb in post_token_balances:
                             if pb.get("owner") == wallet_address:
                                 mint = pb.get("mint")
                                 if mint and mint != "So11111111121111111111111111111111111111112":
                                     token_mint = mint
                                     break
-                        if token_mint == wallet_address and post_balances:
-                            for pb in post_balances:
+                        if token_mint == wallet_address and post_token_balances:
+                            for pb in post_token_balances:
                                 mint = pb.get("mint")
                                 if mint and mint != "So11111111121111111111111111111111111111112":
                                     token_mint = mint
@@ -106,7 +123,9 @@ def check_solana_activity(wallet_address):
 
                 return {
                     "hash": tx_hash,
-                    "type": "SOLANA SWAP / TX",
+                    "type": "SOLANA SWAP",
+                    "amount": spent_amount,
+                    "unit": "SOL",
                     "ca": token_mint
                 }
         return None
@@ -115,7 +134,6 @@ def check_solana_activity(wallet_address):
 
 def check_evm_activity(wallet_address):
     try:
-        # Menggunakan txlist untuk menangkap semua aktivitas transaksi umum (termasuk interaksi smart contract & swap)
         url = f"https://api.etherscan.io/api?module=account&action=txlist&address={wallet_address}&startblock=0&endblock=99999999&page=1&offset=1&sort=desc&apikey={ETHERSCAN_API_KEY}"
         response = requests.get(url, timeout=10)
         if response.status_code == 200:
@@ -124,9 +142,16 @@ def check_evm_activity(wallet_address):
                 tx_info = data["result"][0]
                 tx_hash = tx_info.get("hash")
                 to_address = tx_info.get("to") or wallet_address
+                
+                # Konversi nilai wei ke ETH
+                value_wei = int(tx_info.get("value", "0"))
+                value_eth = round(value_wei / 1e18, 4)
+                
                 return {
                     "hash": tx_hash,
-                    "type": "EVM TX / CONTRACT INTERACTION",
+                    "type": "EVM TX / SWAP",
+                    "amount": value_eth,
+                    "unit": "ETH",
                     "ca": to_address
                 }
         return None
@@ -134,7 +159,7 @@ def check_evm_activity(wallet_address):
         return None
 
 def main():
-    print("Bot Alert V5 Berjalan (All Activity Mode)...")
+    print("Bot Alert V6 Berjalan (With Amount Spent Tracking)...")
     while True:
         for address, name in WATCHED_WALLETS_SOL.items():
             tx = check_solana_activity(address)
