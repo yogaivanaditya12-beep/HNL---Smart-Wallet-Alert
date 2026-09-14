@@ -6,9 +6,8 @@ from datetime import datetime
 TELEGRAM_BOT_TOKEN = "8925455594:AAHzlQM2bOjAwCiDvu2DhpT7vj8tacgiKE4"
 TELEGRAM_GROUP_CHAT_ID = "-1002362131585"
 
-# --- API KEY & FILTER ---
+# --- API KEY ---
 ETHERSCAN_API_KEY = "4TG86FPSB6Y3FS4ZJ7BZHGSW3KQ"
-MIN_USD_THRESHOLD = 50.0  # Diturunkan sementara ke $50 agar lebih mudah mendeteksi aktivitas saat uji coba
 
 # --- DATABASE SMART WALLET ---
 WATCHED_WALLETS_SOL = {
@@ -29,22 +28,18 @@ WATCHED_WALLETS_EVM = {
     "0x15b8ceec9120d30c7284d9d5eee9efb3659211ef": "Robinhood Whale 6",
 }
 
+# Stablecoins yang diabaikan (USDC, USDT, Wrapped SOL)
+IGNORE_TOKENS = [
+    "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", # USDC Solana
+    "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB", # USDT Solana
+    "So11111111121111111111111111111111111111112", # wSOL
+]
+
 last_tx_cache = {}
 
 def log_terminal(message):
     current_time = datetime.now().strftime("%H:%M:%S")
     print(f"[{current_time}] {message}")
-
-def get_crypto_prices():
-    try:
-        url = "https://api.coingecko.com/api/v3/simple/price?ids=solana,ethereum&vs_currencies=usd"
-        resp = requests.get(url, timeout=5)
-        if resp.status_code == 200:
-            data = resp.json()
-            return data.get("solana", {}).get("usd", 150.0), data.get("ethereum", {}).get("usd", 3000.0)
-    except Exception:
-        pass
-    return 150.0, 3000.0
 
 def send_telegram_alert(network, name, address, tx):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -53,7 +48,6 @@ def send_telegram_alert(network, name, address, tx):
         f"👤 *Target:* {name}\n"
         f"👛 *Wallet:* `{address[:6]}...{address[-4:]}`\n"
         f"🟢 *Action:* {tx['type']}\n"
-        f"💵 *Est. Value:* `${tx['usd_value']:,.2f} USD`\n"
         f"🪙 *Token/CA:*\n`{tx['ca']}`"
     )
     
@@ -68,11 +62,11 @@ def send_telegram_alert(network, name, address, tx):
 
     try:
         requests.post(url, json={"chat_id": TELEGRAM_GROUP_CHAT_ID, "text": message, "parse_mode": "Markdown", "reply_markup": reply_markup}, timeout=10)
-        log_terminal(f"✅ ALERT TERKIRIM: {name} ({network}) - ${tx['usd_value']:,.2f}")
+        log_terminal(f"✅ ALERT TERKIRIM: {name} ({network}) mendeteksi token baru!")
     except Exception as e:
         log_terminal(f"❌ Gagal kirim Telegram: {e}")
 
-def check_solana_activity(wallet_address, sol_price):
+def check_solana_activity(wallet_address):
     try:
         rpc_url = "https://api.mainnet-beta.solana.com"
         payload = {"jsonrpc": "2.0", "id": 1, "method": "getSignaturesForAddress", "params": [wallet_address, {"limit": 1}]}
@@ -88,41 +82,25 @@ def check_solana_activity(wallet_address, sol_price):
                 
                 if tx_resp.status_code == 200 and tx_resp.json().get("result"):
                     meta = tx_resp.json()["result"]["meta"]
-                    account_keys = tx_resp.json()["result"]["transaction"]["message"]["accountKeys"]
+                    token_mint = None
                     
-                    spent_usd = 0.0
-                    token_mint = wallet_address
-                    
-                    # Hitung SOL murni yang keluar
-                    for idx, acc in enumerate(account_keys):
-                        pubkey = acc.get("pubkey") if isinstance(acc, dict) else acc
-                        if pubkey == wallet_address and idx < len(meta["preBalances"]) and idx < len(meta["postBalances"]):
-                            diff = meta["preBalances"][idx] - meta["postBalances"][idx]
-                            if diff > 10000000: # Abaikan jika hanya bayar gas (di atas 0.01 SOL baru dihitung)
-                                spent_usd += (diff / 1e9) * sol_price
-                            break
-                    
-                    # Cari token yang dibeli/diterima
+                    # Mencari CA token apa saja yang berinteraksi/masuk ke wallet (kecuali stablecoin)
                     for pb in meta.get("postTokenBalances", []):
                         if pb.get("owner") == wallet_address:
                             mint = pb.get("mint")
-                            if mint and mint not in ["So11111111121111111111111111111111111111112", "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"]:
+                            if mint and mint not in IGNORE_TOKENS:
                                 token_mint = mint
                                 break
-
-                    # Jika tidak ada pengeluaran SOL signifikan, tapi ada token masuk, kita set default nominal untuk deteksi swap stabil
-                    if spent_usd == 0 and token_mint != wallet_address:
-                        spent_usd = MIN_USD_THRESHOLD + 1.0 
                     
-                    if spent_usd >= MIN_USD_THRESHOLD:
-                        return {"hash": tx_hash, "type": "SOLANA SWAP / BUY", "usd_value": spent_usd, "ca": token_mint}
+                    if token_mint:
+                        return {"hash": tx_hash, "type": "SOLANA TOKEN ACTIVITY", "ca": token_mint}
         return None
     except Exception:
         return None
 
-def check_evm_activity(wallet_address, eth_price):
+def check_evm_activity(wallet_address):
     try:
-        # Endpoint tokentx untuk melacak penerimaan token ERC-20
+        # Menggunakan tokentx untuk melacak penerimaan token ERC-20
         url = f"https://api.etherscan.io/api?module=account&action=tokentx&address={wallet_address}&page=1&offset=1&sort=desc&apikey={ETHERSCAN_API_KEY}"
         response = requests.get(url, timeout=10)
         
@@ -131,39 +109,37 @@ def check_evm_activity(wallet_address, eth_price):
             if data.get("status") == "1" and len(data.get("result", [])) > 0:
                 tx_info = data["result"][0]
                 
-                # Pastikan token benar-benar masuk ke wallet target (BUY/RECEIVE)
+                # Memastikan transaksi adalah token IN (masuk) ke wallet
                 if tx_info.get("to", "").lower() == wallet_address.lower():
                     tx_hash = tx_info.get("hash")
                     token_contract = tx_info.get("contractAddress")
                     token_symbol = tx_info.get("tokenSymbol", "TOKEN")
                     
-                    return {"hash": tx_hash, "type": f"EVM BUY ({token_symbol})", "usd_value": MIN_USD_THRESHOLD + 5.0, "ca": token_contract}
+                    return {"hash": tx_hash, "type": f"EVM BUY ({token_symbol})", "ca": token_contract}
         return None
     except Exception:
         return None
 
 def main():
-    log_terminal("Memulai Bot Smart Wallet (Versi Optimalisasi Jaringan)...")
+    log_terminal("Memulai Bot Pelacak Smart Wallet CA (Ringan & Cepat)...")
     while True:
-        sol_price, eth_price = get_crypto_prices()
-
         for address, name in WATCHED_WALLETS_SOL.items():
             log_terminal(f"Memindai {name} (SOL)...")
-            tx = check_solana_activity(address, sol_price)
+            tx = check_solana_activity(address)
             if tx and tx["hash"] != last_tx_cache.get(address):
                 last_tx_cache[address] = tx["hash"]
                 send_telegram_alert("SOLANA", name, address, tx)
-            time.sleep(2) # Cegah blokir RPC Solana
+            time.sleep(2) # Jeda untuk hindari limit RPC
 
         for address, name in WATCHED_WALLETS_EVM.items():
             log_terminal(f"Memindai {name} (EVM)...")
-            tx = check_evm_activity(address, eth_price)
+            tx = check_evm_activity(address)
             if tx and tx["hash"] != last_tx_cache.get(address):
                 last_tx_cache[address] = tx["hash"]
                 send_telegram_alert("EVM", name, address, tx)
-            time.sleep(2) # Cegah blokir Etherscan API
+            time.sleep(2) # Jeda untuk hindari limit Etherscan
 
-        log_terminal("Jeda siklus 15 detik sebelum pemindaian ulang...")
+        log_terminal("Siklus selesai. Jeda 15 detik...")
         time.sleep(15)
 
 if __name__ == "__main__":
